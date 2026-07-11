@@ -17,6 +17,7 @@
 package com.android.systemui.qs.composefragment.viewmodel
 
 import android.content.res.Resources
+import android.media.AudioManager
 import androidx.annotation.FloatRange
 import androidx.annotation.VisibleForTesting
 import androidx.compose.runtime.derivedStateOf
@@ -30,6 +31,8 @@ import androidx.lifecycle.LifecycleCoroutineScope
 import com.android.app.tracing.coroutines.launchTraced as launch
 import com.android.internal.logging.UiEventLogger
 import com.android.keyguard.BouncerPanelExpansionCalculator
+import com.android.settingslib.volume.data.repository.AudioRepository
+import com.android.settingslib.volume.shared.model.AudioStream
 import com.android.systemui.Dumpable
 import com.android.systemui.animation.ShadeInterpolation
 import com.android.systemui.classifier.Classifier
@@ -73,6 +76,8 @@ import com.android.systemui.statusbar.StatusBarState
 import com.android.systemui.statusbar.SysuiStatusBarStateController
 import com.android.systemui.statusbar.disableflags.data.repository.DisableFlagsRepository
 import com.android.systemui.util.LargeScreenUtils
+import com.android.systemui.volume.panel.component.volume.slider.ui.viewmodel.AudioStreamSliderViewModel
+import com.android.systemui.volume.panel.component.volume.slider.ui.viewmodel.SliderViewModel
 import com.android.systemui.util.asIndenting
 import com.android.systemui.util.kotlin.emitOnStart
 import com.android.systemui.util.printSection
@@ -86,11 +91,14 @@ import javax.inject.Named
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.stateIn
 
 class QSFragmentComposeViewModel
 @AssistedInject
@@ -119,6 +127,8 @@ constructor(
     private val mediaCarouselInteractor: MediaCarouselInteractor,
     val mediaViewModelFactory: MediaViewModel.Factory,
     shadeStatusBarComponentsInteractor: ShadeStatusBarComponentsInteractor,
+    private val audioStreamSliderViewModelFactory: AudioStreamSliderViewModel.Factory,
+    private val audioRepository: AudioRepository,
 ) : Dumpable, ExclusiveActivatable() {
 
     val containerViewModel = containerViewModelFactory.create(supportsBrightnessMirroring = true)
@@ -147,6 +157,61 @@ constructor(
         footerActionsViewModelFactory.create(lifecycleScope).also {
             lifecycleScope.launch { footerActionsController.init() }
         }
+
+    private val volumeStreams =
+        listOf(
+            AudioManager.STREAM_MUSIC,
+            AudioManager.STREAM_VOICE_CALL,
+            AudioManager.STREAM_RING,
+            AudioManager.STREAM_NOTIFICATION,
+            AudioManager.STREAM_ALARM,
+        )
+
+    /**
+     * Lazy so the underlying audio flows are only collected once the QS volume slider is shown
+     * for the first time. The viewmodel per stream is stable; only the list order changes.
+     */
+    private val volumeSliderViewModelsByStream: Map<Int, SliderViewModel> by lazy {
+        volumeStreams.associateWith { stream ->
+            audioStreamSliderViewModelFactory.create(
+                AudioStreamSliderViewModel.FactoryAudioStreamWrapper(AudioStream(stream)),
+                lifecycleScope,
+            )
+        }
+    }
+
+    /**
+     * Horizontal volume sliders shown in QS, ordered with the currently most relevant stream
+     * first — that's the one visible while collapsed, the rest are revealed by the expand button.
+     * Relevance follows what the volume keys / vertical volume dialog would target: the ring
+     * stream while ringing, the call stream during a call, media otherwise.
+     */
+    val volumeSliderViewModels: StateFlow<List<SliderViewModel>> by lazy {
+        audioRepository.mode
+            .map { mode ->
+                val primaryStream =
+                    when (mode) {
+                        AudioManager.MODE_RINGTONE -> AudioManager.STREAM_RING
+                        AudioManager.MODE_IN_CALL,
+                        AudioManager.MODE_IN_COMMUNICATION -> AudioManager.STREAM_VOICE_CALL
+                        else -> AudioManager.STREAM_MUSIC
+                    }
+                orderedVolumeSliders(primaryStream)
+            }
+            .stateIn(
+                lifecycleScope,
+                SharingStarted.Eagerly,
+                orderedVolumeSliders(AudioManager.STREAM_MUSIC),
+            )
+    }
+
+    private fun orderedVolumeSliders(primaryStream: Int): List<SliderViewModel> =
+        listOf(volumeSliderViewModelsByStream.getValue(primaryStream)) +
+            volumeStreams
+                .filter { it != primaryStream }
+                .map { volumeSliderViewModelsByStream.getValue(it) }
+
+    var volumeSlidersExpanded by mutableStateOf(false)
 
     var isQsExpanded by mutableStateOf(false)
 
