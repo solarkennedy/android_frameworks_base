@@ -97,6 +97,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.android.app.tracing.coroutines.launchTraced
 import com.android.compose.animation.scene.ContentKey
 import com.android.compose.animation.scene.ContentScope
+import com.android.compose.PlatformSliderDefaults
 import com.android.compose.animation.scene.ElementKey
 import com.android.compose.animation.scene.ElementMatcher
 import com.android.compose.animation.scene.MutableSceneTransitionLayoutState
@@ -162,6 +163,7 @@ import com.android.systemui.statusbar.policy.ConfigurationController
 import com.android.systemui.statusbar.policy.ConfigurationController.ConfigurationListener
 import com.android.systemui.util.LifecycleFragment
 import com.android.systemui.util.animation.MeasurementInput
+import com.android.systemui.volume.panel.component.volume.ui.composable.ColumnVolumeSliders
 import com.android.systemui.util.animation.UniqueObjectHostView
 import com.android.systemui.util.asIndenting
 import com.android.systemui.util.children
@@ -835,6 +837,7 @@ constructor(
                             .collect { collapsed ->
                                 if (collapsed) {
                                     scrollState.scrollTo(0)
+                                    viewModel.volumeSlidersExpanded = false
                                 }
                             }
                     }
@@ -873,6 +876,11 @@ constructor(
                         val BrightnessSlider: @Composable () -> Unit = {
                             Element(Elements.BrightnessSlider, modifier = modifier) {
                                 BrightnessSlider(viewModel, layoutState)
+                            }
+                        }
+                        val VolumeSliders: @Composable () -> Unit = {
+                            Element(Elements.VolumeSliders, modifier = modifier) {
+                                VolumeSliders(viewModel, layoutState)
                             }
                         }
                         val TileGrid =
@@ -935,6 +943,7 @@ constructor(
                                     } else {
                                         {}
                                     },
+                                volume = VolumeSliders,
                                 tiles = TileGrid,
                                 media = Media,
                                 mediaInRow = viewModel.qsMediaInRow,
@@ -985,6 +994,36 @@ constructor(
                             Color.Transparent,
                             ContainerColors.defaultContainerColor,
                         ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun VolumeSliders(
+        viewModel: QSFragmentComposeViewModel,
+        layoutState: SceneTransitionLayoutState,
+    ) {
+        Box(
+            Modifier.systemGestureExclusionInShade(
+                enabled = {
+                    // See BrightnessSlider above: only exclude gestures once the
+                    // transition into QS has settled.
+                    layoutState.transitionState is TransitionState.Idle &&
+                        viewModel.isNotTransitioning
+                }
+            )
+        ) {
+            val volumeSliderViewModels by
+                viewModel.volumeSliderViewModels.collectAsStateWithLifecycle()
+            AlwaysDarkMode {
+                ColumnVolumeSliders(
+                    viewModels = volumeSliderViewModels,
+                    isExpanded = viewModel.volumeSlidersExpanded,
+                    onExpandedChanged = { viewModel.volumeSlidersExpanded = it },
+                    sliderColors = PlatformSliderDefaults.defaultPlatformSliderColors(),
+                    isExpandable = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -1543,10 +1582,12 @@ fun QuickSettingsLayout(
     tiles: @Composable () -> Unit,
     media: @Composable () -> Unit,
     mediaInRow: Boolean,
+    volume: @Composable () -> Unit = {},
 ) {
     val brightnessSettings = rememberQsBrightnessSettings()
     val sliderAtTop = brightnessSettings.sliderAtTop
     val showSlider = brightnessSettings.showSlider
+    val showVolumeSlider = rememberQsShowVolumeSlider()
 
     Column(
         verticalArrangement = spacedBy(dimensionResource(R.dimen.qs_tile_margin_vertical)),
@@ -1554,6 +1595,10 @@ fun QuickSettingsLayout(
     ) {
         if (showSlider != 0 && sliderAtTop) {
             brightness()
+        }
+
+        if (showVolumeSlider && sliderAtTop) {
+            volume()
         }
 
         if (mediaInRow) {
@@ -1570,6 +1615,10 @@ fun QuickSettingsLayout(
 
         if (showSlider != 0 && !sliderAtTop) {
             brightness()
+        }
+
+        if (showVolumeSlider && !sliderAtTop) {
+            volume()
         }
 
         if (!mediaInRow) {
@@ -1686,3 +1735,42 @@ private data class QsBrightnessSettings(
     val sliderAtTop: Boolean,
     val showSlider: Int,
 )
+
+@Composable
+private fun rememberQsShowVolumeSlider(): Boolean {
+    val context = LocalContext.current
+    val cr = remember { context.contentResolver }
+
+    fun readCurrent(): Boolean =
+        runCatching {
+            LineageSettings.Secure.getIntForUser(
+                cr, LineageSettings.Secure.QS_SHOW_VOLUME_SLIDER,
+                0, UserHandle.USER_CURRENT
+            )
+        }.getOrElse { 0 } != 0
+
+    var state by remember {
+        mutableStateOf(readCurrent())
+    }
+
+    DisposableEffect(Unit) {
+        val observer = object : ContentObserver(null) {
+            override fun onChange(selfChange: Boolean) {
+                context.mainExecutor.execute {
+                    state = readCurrent()
+                }
+            }
+        }
+
+        cr.registerContentObserver(
+            LineageSettings.Secure.getUriFor(LineageSettings.Secure.QS_SHOW_VOLUME_SLIDER),
+            false, observer, UserHandle.USER_ALL
+        )
+
+        onDispose {
+            cr.unregisterContentObserver(observer)
+        }
+    }
+
+    return state
+}
