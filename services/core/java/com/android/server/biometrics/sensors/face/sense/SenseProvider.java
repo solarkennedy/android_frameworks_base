@@ -652,7 +652,15 @@ public class SenseProvider implements ServiceProvider {
                     return;
                 }
             }
-            scheduleUpdateActiveUserWithoutHandler(userId);
+            // The setActiveUser round-trip costs 300-700ms serialized ahead of
+            // every authentication (measured on pepito), i.e. on every unlock.
+            // Only schedule it when the HAL-side user actually needs it: user
+            // mismatch (including USER_NULL after daemon death/rebind) or an
+            // authenticatorId never cached for this user. Enroll/remove paths
+            // keep the unconditional update since enrollment changes it.
+            if (userId != mCurrentUserId || !mAuthenticatorIds.containsKey(userId)) {
+                scheduleUpdateActiveUserWithoutHandler(userId);
+            }
 
             final boolean isStrongBiometric = Utils.isStrongBiometric(mSensorId);
             final FaceAuthenticationClient client = new FaceAuthenticationClient(mContext,
