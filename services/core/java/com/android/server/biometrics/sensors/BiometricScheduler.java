@@ -311,6 +311,13 @@ public class BiometricScheduler<T, U> {
             Slog.d(TAG, "No operations, returning to idle");
             return;
         }
+        // Legacy-style providers (SenseProvider) manage the active HAL user themselves
+        // and construct this scheduler without a currentUserRetriever; run operations
+        // in order. Guard ported from crDroid's Sense patchset.
+        if (mCurrentUserRetriever == null) {
+            startNextOperationIfIdle();
+            return;
+        }
 
         final int currentUserId = mCurrentUserRetriever.get();
         final int nextUserId = mPendingOperations.getFirst().getTargetUserId();
