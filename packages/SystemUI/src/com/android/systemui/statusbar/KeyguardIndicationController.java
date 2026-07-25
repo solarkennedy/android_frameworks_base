@@ -71,6 +71,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.text.TextUtils;
@@ -233,6 +234,20 @@ public class KeyguardIndicationController {
     private int mChargingWattage;
     private int mBatteryLevel = -1;
     private boolean mBatteryPresent = true;
+
+    // Rolling average of BATTERY_PROPERTY_CURRENT_NOW. The PMI8950 fuel gauge (qpnp-fg) does
+    // not implement POWER_SUPPLY_PROP_CURRENT_AVG, so BATTERY_PROPERTY_CURRENT_AVERAGE is
+    // unavailable and we average the instantaneous reading here instead.
+    private static final int CURRENT_SAMPLE_COUNT = 6;
+    private static final long CURRENT_SAMPLE_INTERVAL_MS = 5000L;
+    /** Samples older than this are discarded rather than averaged into a stale figure. */
+    private static final long CURRENT_SAMPLE_MAX_AGE_MS = 120_000L;
+    private final int[] mCurrentSamplesUa = new int[CURRENT_SAMPLE_COUNT];
+    private int mCurrentSampleCount;
+    private int mCurrentSampleIndex;
+    private long mLastCurrentSampleElapsed;
+    private Runnable mCancelCurrentSampling;
+    private BatteryManager mBatteryManager;
     protected long mChargingTimeRemaining;
     private Pair<String, BiometricSourceType> mBiometricErrorMessageToShowOnScreenOn;
     private Set<Integer> mCoExFaceAcquisitionMsgIdsToShow;
@@ -490,6 +505,7 @@ public class KeyguardIndicationController {
         mHandler.removeCallbacksAndMessages(null);
         mHideBiometricMessageHandler.cancel();
         mHideTransientMessageHandler.cancel();
+        stopCurrentSampling();
         mBroadcastDispatcher.unregisterReceiver(mBroadcastReceiver);
     }
 
@@ -672,11 +688,132 @@ public class KeyguardIndicationController {
                             .setTextColor(getInitialTextColorState())
                             .build(),
                     animate);
+        } else if (mBatteryPresent && mBatteryLevel != -1) {
+            // Not charging: still surface the level, matching the dozing branch in
+            // updateDeviceEntryIndication(). The privacy chip animates the status bar
+            // battery icon away whenever face unlock opens the camera, so the lock
+            // screen would otherwise have no battery readout at all.
+            String powerIndication =
+                    NumberFormat.getPercentInstance().format(mBatteryLevel / 100f);
+
+            // Always label the state, to contrast with the "Charging" indications. The drain
+            // figure is only appended once the sampler has a usable average.
+            int averageUa = getAverageCurrentUa();
+            if (averageUa < 0) {
+                powerIndication = mContext.getResources().getString(
+                        R.string.keyguard_indication_battery_drain, powerIndication,
+                        NumberFormat.getIntegerInstance().format(-averageUa / 1000));
+            } else {
+                powerIndication = mContext.getResources().getString(
+                        R.string.keyguard_indication_discharging, powerIndication);
+            }
+
+            mKeyguardLogger.logUpdateBatteryIndication(powerIndication, mPowerPluggedIn);
+            mRotateTextViewController.updateIndication(
+                    INDICATION_TYPE_BATTERY,
+                    new KeyguardIndication.Builder()
+                            .setMessage(powerIndication)
+                            .setTextColor(getInitialTextColorState())
+                            .build(),
+                    animate);
         } else {
             mKeyguardLogger.log(TAG, LogLevel.DEBUG, "hide battery indication");
             // don't show the charging information
             mRotateTextViewController.hideIndication(INDICATION_TYPE_BATTERY);
         }
+    }
+
+    /**
+     * Begin periodically sampling battery current. Only runs while the indication area is
+     * actually on screen; the read is a binder call into BatteryService and ultimately a sysfs
+     * read, so we don't want it ticking behind a locked screen that nobody is looking at.
+     */
+    private void startCurrentSampling() {
+        if (mCancelCurrentSampling != null) {
+            return;
+        }
+        sampleBatteryCurrent();
+        scheduleNextCurrentSample();
+    }
+
+    private void scheduleNextCurrentSample() {
+        mCancelCurrentSampling = mBackgroundExecutor.executeDelayed(() -> {
+            mCancelCurrentSampling = null;
+            if (!mVisible || mDozing) {
+                return;
+            }
+            sampleBatteryCurrent();
+            mExecutor.execute(() -> {
+                if (mVisible && !mDozing) {
+                    updateDeviceEntryIndication(false);
+                }
+            });
+            scheduleNextCurrentSample();
+        }, CURRENT_SAMPLE_INTERVAL_MS);
+    }
+
+    private void stopCurrentSampling() {
+        if (mCancelCurrentSampling != null) {
+            mCancelCurrentSampling.run();
+            mCancelCurrentSampling = null;
+        }
+    }
+
+    private void sampleBatteryCurrent() {
+        if (mBatteryManager == null) {
+            mBatteryManager = mContext.getSystemService(BatteryManager.class);
+            if (mBatteryManager == null) {
+                return;
+            }
+        }
+        int currentUa = mBatteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+        if (currentUa == Integer.MIN_VALUE || currentUa == 0) {
+            // Unsupported by the fuel gauge, or a bogus reading; don't poison the average.
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (now - mLastCurrentSampleElapsed > CURRENT_SAMPLE_MAX_AGE_MS) {
+            resetCurrentSamples();
+        }
+        mLastCurrentSampleElapsed = now;
+        mCurrentSamplesUa[mCurrentSampleIndex] = currentUa;
+        mCurrentSampleIndex = (mCurrentSampleIndex + 1) % CURRENT_SAMPLE_COUNT;
+        if (mCurrentSampleCount < CURRENT_SAMPLE_COUNT) {
+            mCurrentSampleCount++;
+        }
+    }
+
+    private void resetCurrentSamples() {
+        mCurrentSampleCount = 0;
+        mCurrentSampleIndex = 0;
+    }
+
+    /**
+     * @return the averaged battery current in microamps, or 0 if no usable samples. Positive
+     *         means charging, negative means discharging (qpnp-smbcharger negates the fuel
+     *         gauge's reading to match the Android convention).
+     */
+    private int getAverageCurrentUa() {
+        if (mCurrentSampleCount == 0) {
+            return 0;
+        }
+        if (SystemClock.elapsedRealtime() - mLastCurrentSampleElapsed > CURRENT_SAMPLE_MAX_AGE_MS) {
+            return 0;
+        }
+        long sum = 0;
+        for (int i = 0; i < mCurrentSampleCount; i++) {
+            sum += mCurrentSamplesUa[i];
+        }
+        return (int) (sum / mCurrentSampleCount);
+    }
+
+    /** Formats microwatts as e.g. "5.4 W". */
+    private String formatMicroWatts(int microWatts) {
+        NumberFormat format = NumberFormat.getNumberInstance();
+        format.setMaximumFractionDigits(1);
+        format.setMinimumFractionDigits(1);
+        return mContext.getResources().getString(
+                R.string.keyguard_indication_watts, format.format(microWatts / 1_000_000f));
     }
 
     private void updateLockScreenUserLockedMsg(int userId) {
@@ -974,6 +1111,11 @@ public class KeyguardIndicationController {
     public void setVisible(boolean visible) {
         mVisible = visible;
         mIndicationArea.setVisibility(visible ? VISIBLE : GONE);
+        if (visible && !mDozing) {
+            startCurrentSampling();
+        } else {
+            stopCurrentSampling();
+        }
         if (visible) {
             // If this is called after an error message was already shown, we should not clear it.
             // Otherwise the error message won't be shown
@@ -1256,23 +1398,12 @@ public class KeyguardIndicationController {
         final boolean hasChargingTime = mChargingTimeRemaining > 0;
         int chargingId;
         if (mPowerPluggedInWired) {
-            switch (mChargingSpeed) {
-                case BatteryStatus.CHARGING_FAST:
-                    chargingId = hasChargingTime
-                            ? R.string.keyguard_indication_charging_time_fast
-                            : R.string.keyguard_plugged_in_charging_fast;
-                    break;
-                case BatteryStatus.CHARGING_SLOWLY:
-                    chargingId = hasChargingTime
-                            ? R.string.keyguard_indication_charging_time_slowly
-                            : R.string.keyguard_plugged_in_charging_slowly;
-                    break;
-                default:
-                    chargingId = hasChargingTime
-                            ? R.string.keyguard_indication_charging_time
-                            : R.string.keyguard_plugged_in;
-                    break;
-            }
+            // Report the charger's negotiated maximum power instead of bucketing it into
+            // "fast"/"slowly" against config_chargingFastThreshold. The wattage suffix is
+            // appended below.
+            chargingId = hasChargingTime
+                    ? R.string.keyguard_indication_charging_time
+                    : R.string.keyguard_plugged_in;
         } else if (mPowerPluggedInWireless) {
             chargingId = hasChargingTime
                     ? R.string.keyguard_indication_charging_time_wireless
@@ -1287,14 +1418,22 @@ public class KeyguardIndicationController {
                     : R.string.keyguard_plugged_in;
         }
 
+        String indication;
         if (hasChargingTime) {
             String chargingTimeFormatted = Formatter.formatShortElapsedTimeRoundingUpToMinutes(
                     mContext, mChargingTimeRemaining);
-            return mContext.getResources().getString(chargingId, chargingTimeFormatted,
+            indication = mContext.getResources().getString(chargingId, chargingTimeFormatted,
                     percentage);
         } else {
-            return mContext.getResources().getString(chargingId, percentage);
+            indication = mContext.getResources().getString(chargingId, percentage);
         }
+
+        if (mPowerPluggedInWired && mChargingWattage > 0) {
+            indication = mContext.getResources().getString(
+                    R.string.keyguard_indication_charging_max_power, indication,
+                    formatMicroWatts(mChargingWattage));
+        }
+        return indication;
     }
 
     public void setStatusBarKeyguardViewManager(
@@ -1839,6 +1978,9 @@ public class KeyguardIndicationController {
 
                     if (mDozing) {
                         hideBiometricMessage();
+                        stopCurrentSampling();
+                    } else if (mVisible) {
+                        startCurrentSampling();
                     }
                     updateDeviceEntryIndication(false);
                 }
