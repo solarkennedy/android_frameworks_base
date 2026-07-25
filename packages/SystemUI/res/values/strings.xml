@@ -1479,6 +1479,18 @@
     <!-- Indication on the keyguard that is shown when the device is dock charging. [CHAR LIMIT=80]-->
     <string name="keyguard_indication_charging_time_dock"><xliff:g id="percentage" example="20%">%2$s</xliff:g> • Charging • Full in <xliff:g id="charging_time_left" example="4 hr, 2 min">%1$s</xliff:g></string>
 
+    <!-- Power in watts, appended to a keyguard charging indication. [CHAR LIMIT=16]-->
+    <string name="keyguard_indication_watts"><xliff:g id="watts" example="5.4">%1$s</xliff:g> W</string>
+
+    <!-- Keyguard charging indication with the charger's maximum negotiated power appended. [CHAR LIMIT=80]-->
+    <string name="keyguard_indication_charging_max_power"><xliff:g id="indication" example="47% • Charging">%1$s</xliff:g> • <xliff:g id="max_power" example="5.4 W">%2$s</xliff:g> max</string>
+
+    <!-- Keyguard indication showing the battery level while running on battery. [CHAR LIMIT=80]-->
+    <string name="keyguard_indication_discharging"><xliff:g id="percentage" example="47%">%1$s</xliff:g> • Discharging</string>
+
+    <!-- Keyguard indication showing the battery level and average discharge current. [CHAR LIMIT=80]-->
+    <string name="keyguard_indication_battery_drain"><xliff:g id="percentage" example="47%">%1$s</xliff:g> • Discharging • <xliff:g id="milliamps" example="320">%2$s</xliff:g> mA</string>
+
     <!-- Label for accessibility action that shows widgets on lock screen on click. [CHAR LIMIT=NONE] -->
     <string name="accessibility_action_open_communal_hub">Widgets on lock screen</string>
 
