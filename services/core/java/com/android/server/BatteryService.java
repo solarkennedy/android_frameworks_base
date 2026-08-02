@@ -89,6 +89,9 @@ import com.android.server.health.HealthServiceWrapper;
 import com.android.server.lights.LightsManager;
 import com.android.server.lights.LogicalLight;
 
+import lineageos.health.HealthInterface;
+import lineageos.providers.LineageSettings;
+
 import org.lineageos.internal.notification.LedValues;
 import org.lineageos.internal.notification.LineageBatteryLights;
 
@@ -787,10 +790,45 @@ public final class BatteryService extends SystemService {
         };
     }
 
+    /**
+     * When Lineage charging control is holding the charge at the user-configured limit, the
+     * charger reports DISCHARGING/NOT_CHARGING and the battery never reads FULL, so charge-cycle
+     * accounting (the batterystats on-unplug reset and the Settings battery-usage session
+     * boundary) never closes. Report FULL in that state: the capped level is this device's
+     * configured "full".
+     */
+    private void applyChargingLimitStatusLocked() {
+        final int status = mHealthInfo.batteryStatus;
+        if (status != BatteryManager.BATTERY_STATUS_DISCHARGING
+                && status != BatteryManager.BATTERY_STATUS_NOT_CHARGING) {
+            return;
+        }
+        if (plugType(mHealthInfo) == BATTERY_PLUGGED_NONE) {
+            return;
+        }
+        final ContentResolver resolver = mContext.getContentResolver();
+        if (LineageSettings.System.getInt(resolver,
+                LineageSettings.System.CHARGING_CONTROL_ENABLED, 0) != 1) {
+            return;
+        }
+        if (LineageSettings.System.getInt(resolver,
+                LineageSettings.System.CHARGING_CONTROL_MODE,
+                HealthInterface.MODE_AUTO) != HealthInterface.MODE_LIMIT) {
+            return;
+        }
+        final int limit = LineageSettings.System.getInt(resolver,
+                LineageSettings.System.CHARGING_CONTROL_LIMIT, 80);
+        if (mHealthInfo.batteryLevel >= limit) {
+            mHealthInfo.batteryStatus = BatteryManager.BATTERY_STATUS_FULL;
+        }
+    }
+
     private void processValuesLocked(boolean force) {
         boolean logOutlier = false;
         long dischargeDuration = 0;
         @BatteryManager.BatteryChargingPolicy int translatedChargingPolicy;
+
+        applyChargingLimitStatusLocked();
 
         mBatteryLevelCritical =
                 mHealthInfo.batteryStatus != BatteryManager.BATTERY_STATUS_UNKNOWN
