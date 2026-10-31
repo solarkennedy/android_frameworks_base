@@ -22,9 +22,11 @@ import android.annotation.Nullable;
 import android.app.ActivityManager;
 import android.app.SynchronousUserSwitchObserver;
 import android.app.UserSwitchObserver;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -44,7 +46,9 @@ import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PatternMatcher;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Settings;
@@ -115,7 +119,17 @@ public class SenseProvider implements ServiceProvider {
     @VisibleForTesting
     public static Clock sSystemClock = Clock.systemUTC();
 
-    private boolean mIsBinding;
+    // A bind that has neither connected nor died after this long is treated as
+    // stale and replaced: the only callbacks that clear mIsBinding are the
+    // connection's own, and a binding declared dead never gets them again.
+    private static final long BIND_STALE_MS = 10 * 1000;
+    // Delay before rebinding after a dead or null binding. The package is often
+    // still being replaced at that moment and resolveService() comes back empty.
+    private static final long REBIND_DELAY_MS = 1000;
+
+    private volatile boolean mIsBinding;
+    private long mBindingSince;
+    @Nullable private SenseServiceConnection mConnection;
     private boolean mTestHalEnabled;
 
     @NonNull private final FaceSensorPropertiesInternal mSensorProperties;
@@ -385,6 +399,44 @@ public class SenseProvider implements ServiceProvider {
             ActivityManager.getService().registerUserSwitchObserver(mUserSwitchObserver, TAG);
         } catch (RemoteException e) {
             Slog.e(TAG, "Unable to register user switch observer");
+        }
+
+        // An update of the Sense package kills its process and declares every
+        // binding to it dead (onBindingDied); rebind once the new copy is in place.
+        final IntentFilter packageFilter = new IntentFilter();
+        packageFilter.addAction(Intent.ACTION_PACKAGE_REPLACED);
+        packageFilter.addAction(Intent.ACTION_PACKAGE_ADDED);
+        packageFilter.addDataScheme("package");
+        packageFilter.addDataSchemeSpecificPart(PACKAGE_NAME, PatternMatcher.PATTERN_LITERAL);
+        mContext.registerReceiverAsUser(new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (Intent.ACTION_PACKAGE_ADDED.equals(intent.getAction())
+                        && intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) {
+                    return; // ACTION_PACKAGE_REPLACED follows for this one
+                }
+                if (getService(mCurrentUserId) != null) {
+                    return; // onBindingDied's own rebind already got there
+                }
+                Slog.d(TAG, "Sense package " + intent.getAction() + ", rebinding");
+                dropBinding();
+                bindService(mCurrentUserId);
+            }
+        }, UserHandle.ALL, packageFilter, null, mHandler);
+    }
+
+    /** Forget the current binding (connected, pending or dead) so bindService() starts anew. */
+    private void dropBinding() {
+        mIsBinding = false;
+        mServices.remove(mCurrentUserId);
+        final SenseServiceConnection connection = mConnection;
+        mConnection = null;
+        if (connection != null) {
+            try {
+                mContext.unbindService(connection);
+            } catch (IllegalArgumentException e) {
+                // already unbound
+            }
         }
     }
 
@@ -1041,7 +1093,46 @@ public class SenseProvider implements ServiceProvider {
                     updateResetSchedule();
                 });
             }
-            mContext.unbindService(this);
+            unbind();
+        }
+
+        // The system will never reconnect this binding (the package was updated,
+        // or its service crashed too often to be restarted): clear the flag that
+        // would otherwise make every later bindService() a no-op, and rebind.
+        @Override
+        public void onBindingDied(ComponentName className) {
+            Slog.w(TAG, "Service binding died : " + mUserId);
+            onBindingLost();
+        }
+
+        @Override
+        public void onNullBinding(ComponentName className) {
+            Slog.w(TAG, "Service returned a null binding : " + mUserId);
+            onBindingLost();
+        }
+
+        private void onBindingLost() {
+            mServices.remove(mUserId);
+            mIsBinding = false;
+            unbind();
+            if (mUserId == mCurrentUserId) {
+                mHandler.postDelayed(() -> {
+                    if (getService(mUserId) == null) {
+                        bindService(mUserId);
+                    }
+                }, REBIND_DELAY_MS);
+            }
+        }
+
+        private void unbind() {
+            if (mConnection == this) {
+                mConnection = null;
+            }
+            try {
+                mContext.unbindService(this);
+            } catch (IllegalArgumentException e) {
+                // already unbound
+            }
         }
 
         public void updateResetSchedule() {
@@ -1079,17 +1170,26 @@ public class SenseProvider implements ServiceProvider {
         if (!isServiceEnabled()) {
             Slog.d(TAG, "Service disabled");
             return false;
-        } else if (mIsBinding) {
+        } else if (mIsBinding
+                && SystemClock.uptimeMillis() - mBindingSince < BIND_STALE_MS) {
             Slog.d(TAG, "Service is binding");
             return true;
         } else {
+            if (mIsBinding) {
+                Slog.w(TAG, "Bind pending for over " + BIND_STALE_MS + " ms, rebinding");
+                dropBinding();
+            }
             if (userId != -10000 && getService(userId) == null) {
                 try {
                     Intent intent = new Intent(BIND_SENSE_ACTION);
                     intent.setClassName(PACKAGE_NAME, SERVICE_NAME);
-                    boolean result = mContext.bindServiceAsUser(intent, new SenseServiceConnection(userId), 1, UserHandle.of(userId));
+                    SenseServiceConnection connection = new SenseServiceConnection(userId);
+                    boolean result = mContext.bindServiceAsUser(intent, connection,
+                            Context.BIND_AUTO_CREATE, UserHandle.of(userId));
                     if (result) {
                         mIsBinding = true;
+                        mBindingSince = SystemClock.uptimeMillis();
+                        mConnection = connection;
                     }
                     return result;
                 } catch (SecurityException e) {
