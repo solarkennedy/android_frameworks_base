@@ -1278,16 +1278,7 @@ class AppIdPermissionPolicy : SchemePolicy() {
                                 !accessBackgroundLocationFlags.hasBits(PermissionFlags.IMPLICIT)
                     }
                     val shouldRetainByMask = newFlags.hasAnyBit(SYSTEM_OR_POLICY_FIXED_MASK)
-                    // Keep a default grant that was in effect while the permission was implicit.
-                    // A system app updated past a split's targetSdk (Play-updated GmsCore going
-                    // 36 -> 37 for INTERNET -> ACCESS_LOCAL_NETWORK) would otherwise lose it with
-                    // no UI to ask again, and only a build fingerprint change re-runs the
-                    // default grants. A user's own denial is not in effect-granted state, so it
-                    // still wins.
-                    val shouldRetainAsPregrant =
-                        oldFlags.hasBits(PermissionFlags.PREGRANT) &&
-                            PermissionFlags.isAppOpGranted(oldFlags)
-                    if (shouldRetainAsBluetooth || shouldRetainByMask || shouldRetainAsPregrant) {
+                    if (shouldRetainAsBluetooth || shouldRetainByMask) {
                         if (wasGrantedByImplicit) {
                             newFlags = newFlags or PermissionFlags.RUNTIME_GRANTED
                         }
