@@ -17,7 +17,8 @@ import java.security.cert.X509Certificate;
 /**
  * Drop-in replacement for the "AndroidKeyStore" security provider, installed only
  * inside the DroidGuard process (com.google.android.gms.unstable) when the PIF
- * config sets spoofProvider=1.
+ * config sets spoofProvider=1, and inside the Play Store (com.android.vending)
+ * when it sets spoofVendingProvider=1.
  *
  * It behaves exactly like the real provider for every operation except one:
  * engineGetCertificateChain refuses to hand back a chain that carries a hardware

@@ -47,7 +47,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * Accepted formats: a flat JSON object, or "KEY=value" lines. Keys that name a
  * Build/Build.VERSION field are spoofed; the control keys are:
  *   spoofBuild (1), spoofVendingFinger (0|1|<fingerprint>), spoofVendingSdk (0),
- *   spoofSignature (0), verboseLogs (0), DEBUG (0).
+ *   spoofSignature (0), spoofProvider (0), spoofVendingProvider (0),
+ *   verboseLogs (0), DEBUG (0).
  *
  * Pepito simplifications vs. Evolution X: the config is read directly from the
  * settings provider / a file instead of via a system_server binder round-trip,
@@ -104,6 +105,7 @@ public final class PlayIntegritySpoofService {
     private volatile String mSpoofVendingFinger = "0";
     private volatile boolean mSpoofVendingSdk = false;
     private volatile boolean mSpoofProvider = false;
+    private volatile boolean mSpoofVendingProvider = false;
     private volatile boolean mDebug = false;
 
     private final Map<String, String> mBuildFields = new ConcurrentHashMap<>();
@@ -180,7 +182,8 @@ public final class PlayIntegritySpoofService {
                     + ", spoofVendingFinger=" + mSpoofVendingFinger
                     + ", spoofVendingSdk=" + mSpoofVendingSdk
                     + ", spoofSignature=" + mSpoofSignature
-                    + ", spoofProvider=" + mSpoofProvider);
+                    + ", spoofProvider=" + mSpoofProvider
+                    + ", spoofVendingProvider=" + mSpoofVendingProvider);
         } catch (Throwable e) {
             Log.e(TAG, "Failed to load PIF config", e);
         }
@@ -266,6 +269,9 @@ public final class PlayIntegritySpoofService {
                 break;
             case "spoofProvider":
                 mSpoofProvider = isTrue(value);
+                break;
+            case "spoofVendingProvider":
+                mSpoofVendingProvider = isTrue(value);
                 break;
             case "DEBUG":
                 mDebug = isTrue(value);
@@ -529,8 +535,27 @@ public final class PlayIntegritySpoofService {
      * hardware key-attestation chains cannot be fetched in this process. Call
      * only from the DroidGuard process, after build fields are spoofed. Idempotent.
      */
+    /**
+     * Per-process gate: spoofProvider covers DroidGuard, spoofVendingProvider
+     * covers the Play Store, which generates its own key attestation record
+     * for each integrity request.
+     */
+    public void spoofProvider(String processName) {
+        if (isDroidGuard(processName) && mSpoofProvider) {
+            installProvider();
+        } else if (isVending(processName) && mSpoofVendingProvider) {
+            installProvider();
+        }
+    }
+
+    /** DroidGuard-only entry point, kept for existing callers. */
     public void spoofProvider() {
-        if (!mSpoofProvider || mProviderSpoofed) return;
+        if (!mSpoofProvider) return;
+        installProvider();
+    }
+
+    private void installProvider() {
+        if (mProviderSpoofed) return;
         try {
             Provider base = Security.getProvider("AndroidKeyStore");
             if (base == null) {
@@ -545,7 +570,7 @@ public final class PlayIntegritySpoofService {
             Security.removeProvider("AndroidKeyStore");
             int pos = Security.insertProviderAt(custom, 1);
             mProviderSpoofed = true;
-            Log.i(TAG, "Keystore attestation hidden in DroidGuard (provider inserted at " + pos + ")");
+            Log.i(TAG, "Keystore attestation hidden in this process (provider inserted at " + pos + ")");
         } catch (Throwable t) {
             Log.e(TAG, "Failed to install PIF keystore provider", t);
         }
