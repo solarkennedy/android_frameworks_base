@@ -363,7 +363,7 @@ public final class PlayIntegritySpoofService {
         }
         try {
             creatorField.setAccessible(true);
-            creatorField.set(null, customCreator);
+            setStatic(creatorField, customCreator);
         } catch (Exception e) {
             Log.e(TAG, "Couldn't replace PackageInfo.CREATOR: " + e);
             return;
@@ -462,12 +462,54 @@ public final class PlayIntegritySpoofService {
                 Log.w(TAG, "Unsupported field type: " + fieldType + " for " + fieldName);
                 return;
             }
-            field.set(null, newValue);
+            setStatic(field, newValue);
             Log.d(TAG + "/Java:" + logSuffix, "[" + fieldName + "]: " + oldValue + " -> " + value);
         } catch (Exception e) {
             Log.e(TAG, "Failed to spoof " + fieldName, e);
         } finally {
             field.setAccessible(false);
+        }
+    }
+
+    /**
+     * Set a static field, final or not. From Android 17 (C), ART refuses
+     * reflective writes to static final fields for apps targeting C or later
+     * (art_field-inl.h IsUnmodifiable), which covers every Build and
+     * Build.VERSION field in GMS. jdk.internal.misc.Unsafe writes the field
+     * slot directly and is reachable from the boot classpath, so fall back to
+     * it when Field.set is refused.
+     */
+    private static void setStatic(Field field, Object value) throws Exception {
+        field.setAccessible(true);
+        try {
+            field.set(null, value);
+            return;
+        } catch (IllegalAccessException e) {
+            // static final on Android C+: write through Unsafe below.
+        }
+        final Class<?> unsafeClass = Class.forName("jdk.internal.misc.Unsafe");
+        final Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+        theUnsafe.setAccessible(true);
+        final Object unsafe = theUnsafe.get(null);
+        final Object base = unsafeClass.getMethod("staticFieldBase", Field.class)
+                .invoke(unsafe, field);
+        final long offset = (long) unsafeClass.getMethod("staticFieldOffset", Field.class)
+                .invoke(unsafe, field);
+        final Class<?> type = field.getType();
+        if (type == int.class) {
+            unsafeClass.getMethod("putIntVolatile", Object.class, long.class, int.class)
+                    .invoke(unsafe, base, offset, (int) value);
+        } else if (type == long.class) {
+            unsafeClass.getMethod("putLongVolatile", Object.class, long.class, long.class)
+                    .invoke(unsafe, base, offset, (long) value);
+        } else if (!type.isPrimitive()) {
+            unsafeClass.getMethod("putReferenceVolatile", Object.class, long.class, Object.class)
+                    .invoke(unsafe, base, offset, value);
+        } else {
+            throw new IllegalArgumentException("unsupported static field type " + type);
+        }
+        if (!java.util.Objects.equals(field.get(null), value)) {
+            throw new IllegalStateException("Unsafe write to " + field.getName() + " did not stick");
         }
     }
 
