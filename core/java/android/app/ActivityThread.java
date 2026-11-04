@@ -8168,6 +8168,22 @@ public final class ActivityThread extends ClientTransactionHandler
         final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
         mConfigurationController.updateLocaleListFromAppContext(appContext);
 
+        // pepito: Play Integrity experiments. Inert unless the Settings.Secure
+        // "spoof_pif_config" key (or /system/etc/pif.json) holds a config, and
+        // only ever touches DroidGuard (com.google.android.gms.unstable) and
+        // the Play Store.
+        final android.security.pif.PlayIntegritySpoofService pif =
+                android.security.pif.PlayIntegritySpoofService.getInstance();
+        if (pif.isTargetProcess(data.processName)) {
+            pif.loadConfig(appContext.getContentResolver());
+            pif.spoofBuildFields(data.processName);
+            if (pif.isDroidGuard(data.processName)) {
+                pif.spoofProvider();
+                pif.spoofSignature(data.processName);
+                pif.logBuildFields();
+            }
+        }
+
         // Initialize the default http proxy in this process.
         Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "Setup proxies");
         try {
