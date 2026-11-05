@@ -106,13 +106,9 @@ public final class PlayIntegritySpoofService {
     private volatile boolean mSpoofVendingSdk = false;
     private volatile boolean mSpoofProvider = false;
     private volatile boolean mSpoofVendingProvider = false;
-    private volatile boolean mSpoofProps = false;
     private volatile boolean mDebug = false;
 
     private final Map<String, String> mBuildFields = new ConcurrentHashMap<>();
-    private final Map<String, String> mProps = new ConcurrentHashMap<>();
-    private static volatile boolean sNativeLoaded = false;
-    private static volatile boolean sNativeUnavailable = false;
     private volatile boolean mConfigLoaded = false;
     private volatile String mConfigSource = "none";
     private volatile boolean mSignatureSpoofed = false;
@@ -280,19 +276,13 @@ public final class PlayIntegritySpoofService {
             case "DEBUG":
                 mDebug = isTrue(value);
                 break;
+            // Upstream config knob with no effect in this port.
             case "spoofProps":
-                mSpoofProps = isTrue(value);
                 break;
             default:
-                if (key.startsWith("_") || key.startsWith("*")
+                if (key.startsWith("_") || key.contains(".") || key.startsWith("*")
                         || "manually_imported".equals(key)) {
-                    // metadata / wildcard patterns: ignored
-                    break;
-                }
-                if (key.contains(".")) {
-                    // A real system-property name (e.g. ro.build.version.sdk):
-                    // overridden natively in the DroidGuard process via libpifprop.
-                    mProps.put(key, value);
+                    // metadata / system-property patterns: ignored
                     break;
                 }
                 mBuildFields.put(key, value);
@@ -550,45 +540,6 @@ public final class PlayIntegritySpoofService {
      * covers the Play Store, which generates its own key attestation record
      * for each integrity request.
      */
-    private static native void nativeAddProp(String name, String value);
-    private static native void nativeClearProps();
-
-    private boolean ensureNativeLib() {
-        if (sNativeLoaded) return true;
-        if (sNativeUnavailable) return false;
-        synchronized (PlayIntegritySpoofService.class) {
-            if (sNativeLoaded) return true;
-            if (sNativeUnavailable) return false;
-            try {
-                System.loadLibrary("pifprop");
-                sNativeLoaded = true;
-            } catch (Throwable t) {
-                Log.e(TAG, "libpifprop load failed; native prop spoofing unavailable", t);
-                sNativeUnavailable = true;
-            }
-        }
-        return sNativeLoaded;
-    }
-
-    /**
-     * Override native system-property reads (ro.build.version.*, ...) in the
-     * DroidGuard process only, through process-local libc overrides
-     * (libpifprop -> __system_property_override_add). Java Build-field
-     * spoofing does not reach DroidGuard's native property reads; this does.
-     * Gated on spoofProps=1 and scoped to DroidGuard.
-     */
-    public void spoofProps(String processName) {
-        if (!mConfigLoaded || !mSpoofProps || !isDroidGuard(processName)) return;
-        if (mProps.isEmpty()) return;
-        if (!ensureNativeLib()) return;
-        nativeClearProps();
-        for (Map.Entry<String, String> e : mProps.entrySet()) {
-            nativeAddProp(e.getKey(), e.getValue());
-            if (mVerboseLogs > 0) Log.d(TAG, "[prop] " + e.getKey() + " -> " + e.getValue());
-        }
-        Log.i(TAG, "Applied " + mProps.size() + " native property overrides in DroidGuard process");
-    }
-
     public void spoofProvider(String processName) {
         if (isDroidGuard(processName) && mSpoofProvider) {
             installProvider();
