@@ -8177,6 +8177,7 @@ public final class ActivityThread extends ClientTransactionHandler
         if (pif.isTargetProcess(data.processName)) {
             pif.loadConfig(appContext.getContentResolver());
             pif.spoofBuildFields(data.processName);
+            pif.spoofProps(data.processName);
             pif.spoofProvider(data.processName);
             if (pif.isDroidGuard(data.processName)) {
                 pif.spoofSignature(data.processName);
